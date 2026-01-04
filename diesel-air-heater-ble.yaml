@@ -1,0 +1,520 @@
+esphome:
+  name: ${name}
+  name_add_mac_suffix: false
+  friendly_name: ${friendly_name}
+  includes:
+    - heater_ble.h
+    - utils.h
+    - formatting.h
+
+substitutions:
+  name: "diesel-air-heater-ble"
+  friendly_name: Diesel Air Heater
+
+esp32_ble_tracker:
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  platform: esphome
+  password: !secret ota_password
+
+# Web Server
+# if you use home assistant and have frequent disconnections. disable the web_server
+web_server:
+  port: 80
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "VevorBLE Hotspot"
+    password: "12345678"
+
+ble_client:
+  - mac_address: !secret mac_address
+    id: heater_ble
+    on_connect:
+      - logger.log: "BLE connected to heater — waiting for telemetry"
+    on_disconnect:
+      - logger.log: "BLE disconnected"
+
+globals:
+  - id: heater_passkey
+    type: int
+    initial_value: !secret passkey
+  - id: mute_set_action
+    type: bool
+    initial_value: 'false'
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+text_sensor:
+  - platform: template
+    id: heater_glow_plug_status
+    name: "Glow Plug Status"
+    icon: "mdi:fire"
+
+  - platform: version
+    hide_timestamp: true
+    name: 'ESPHome Version'
+
+  - platform: wifi_info
+    ip_address:
+      name: 'IP Address'
+      icon: mdi:wifi
+    ssid:
+      name: 'Connected SSID'
+      icon: mdi:wifi-strength-2
+
+interval:
+  - interval: 10s
+    id: heater_poll
+    then:
+      - logger.log: "Polling heater for telemetry..."
+      - ble_client.ble_write:
+          id: heater_ble
+          service_uuid: 0000ffe0-0000-1000-8000-00805f9b34fb
+          characteristic_uuid: 0000ffe1-0000-1000-8000-00805f9b34fb
+          value: !lambda |-
+            auto payload = heater_ble_payload(HeaterCommand::GET_STATUS);
+            ESP_LOGD("BLE", "send poll: %s", format_hex_pretty(payload).c_str());
+            return payload;
+
+sensor:
+  - platform: uptime
+    name: "ESP Uptime"
+    id: uptime_sensor
+
+  - platform: template
+    id: heater_error_code
+    name: "Error Code"
+    accuracy_decimals: 0
+    icon: "mdi:alert-circle-outline"
+
+  - platform: template
+    id: heater_battery_voltage
+    name: "Battery Voltage"
+    unit_of_measurement: "V"
+    device_class: voltage
+    accuracy_decimals: 1
+    icon: "mdi:car-battery"
+
+  - platform: template
+    id: heater_altitude
+    name: "Altitude"
+    unit_of_measurement: "m"
+    device_class: distance
+    accuracy_decimals: 0
+    icon: "mdi:summit"
+
+  - platform: template
+    id: heater_room_temperature
+    name: "Room Temperature"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    accuracy_decimals: 1
+    icon: "mdi:home-thermometer"
+
+  - platform: template
+    id: heater_core_temperature
+    name: "Core Temperature"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    accuracy_decimals: 1
+    icon: "mdi:radiator"
+
+  - platform: ble_client
+    type: characteristic
+    id: my_ble_sensor
+    ble_client_id: heater_ble
+    service_uuid: "0000ffe0-0000-1000-8000-00805f9b34fb"
+    characteristic_uuid: "0000ffe1-0000-1000-8000-00805f9b34fb"
+    name: "BLE Raw Data"
+    internal: true
+    notify: true
+    lambda: |
+      HeaterStatus status;
+      if (heater_ble_parse_frame(x, status)) {
+          ESP_LOGI("BLE", "%s", format_heater_status_pretty(status).c_str());
+      
+          id(heater_battery_voltage).publish_state(status.voltage);
+          id(heater_altitude).publish_state(status.altitude);
+          id(heater_room_temperature).publish_state(status.temperature_room);
+          id(heater_core_temperature).publish_state(status.temperature_shell);
+          id(heater_error_code).publish_state(status.error_code_55);
+          id(heater_power).publish_state(status.is_powered_on);
+          id(heater_level).publish_state(status.run_current_gear);
+          id(heater_temperature).publish_state(status.run_target_temperature_c);
+          id(heater_temp_compensation).publish_state(status.temperature_compensation);
+          id(heater_display_brightness).publish_state(status.brightness);
+          id(heater_auto_on_run_time).publish_state(status.auto_on_duration);
+          id(heater_auto_on_status).publish_state(status.auto_on_enabled);
+          id(heater_glow_plug_status).publish_state(to_string(status.run_step));
+      
+          select_set_index(id(heater_language), (uint8_t) status.language);
+      
+          uint8_t altitude_unit_index = static_cast<uint8_t>(status.altitude_unit);
+          if (altitude_unit_index >= 2) { altitude_unit_index = 2; }
+          select_set_index(id(heater_altitude_unit), (uint8_t) altitude_unit_index);
+      
+          switch (status.run_mode) {
+              case RunMode::GEAR:
+                  id(heater_mode).publish_state("Level");
+                  break;
+              case RunMode::TEMPERATURE:
+                  id(heater_mode).publish_state("Automatic");
+                  break;
+          }
+      
+          id(mute_set_action) = true;
+          auto call = id(heater_auto_on_start_time).make_call();
+          call.set_hour(status.auto_on_start.hour);
+          call.set_minute(status.auto_on_start.minute);
+          call.perform();
+          id(mute_set_action) = false;
+      
+          return 1;
+      } else {
+          ESP_LOGD("BLE", "skipping unknown frame");
+      }
+      
+      return 0;
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 120s
+
+button:
+  - platform: template
+    name: "Set Time"
+    icon: "mdi:clock-edit-outline"
+    on_press:
+      then:
+        - ble_client.ble_write:
+            id: heater_ble
+            service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+            characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+            value: !lambda |-
+              auto t = id(ha_time).now();
+              auto payload = heater_ble_payload_16(HeaterCommand::SET_CURRENT_TIME, t.hour * 60 + t.minute);
+              ESP_LOGD("BLE", "setting time: %s", format_hex_pretty(payload).c_str());
+              return payload;
+
+switch:
+  - platform: template
+    id: heater_power
+    name: "Power"
+    icon: "mdi:power"
+    optimistic: true
+    turn_on_action:
+      - ble_client.ble_write:
+          id: heater_ble
+          service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+          characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+          value: !lambda |-
+            auto payload = heater_ble_payload(HeaterCommand::SET_POWER, 0x01);
+            ESP_LOGD("BLE", "send heater power=on: %s", format_hex_pretty(payload).c_str());
+            return payload;
+    turn_off_action:
+      - ble_client.ble_write:
+          id: heater_ble
+          service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+          characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+          value: !lambda |-
+            auto payload = heater_ble_payload(HeaterCommand::SET_POWER, 0x00);
+            ESP_LOGD("BLE", "send heater power=off: %s", format_hex_pretty(payload).c_str());
+            return payload;
+
+  - platform: template
+    id: heater_auto_on_status
+    name: "Auto On — Status"
+    icon: "mdi:calendar-check-outline"
+    optimistic: true
+    on_state:
+      - ble_client.ble_write:
+          id: heater_ble
+          service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+          characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+          value: !lambda |-
+            uint8_t value = x ? 0x01 : 0x00;
+            auto payload = heater_ble_payload(HeaterCommand::SET_AUTO_ON_ENABLED, value);
+            ESP_LOGD("BLE", "send auto on status=%d: %s", value, format_hex_pretty(payload).c_str());
+            return payload;
+
+select:
+  - platform: template
+    id: heater_mode
+    name: "Mode"
+    icon: "mdi:swap-horizontal"
+    options:
+      - "Level"
+      - "Automatic"
+    initial_option: "Level"
+    optimistic: true
+    set_action:
+      then:
+        - ble_client.ble_write:
+            id: heater_ble
+            service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+            characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+            value: !lambda |-
+              RunMode mode = RunMode::GEAR;
+              if (x == "Automatic") { mode = RunMode::TEMPERATURE; }
+              
+              auto payload = heater_ble_payload(HeaterCommand::SET_RUN_MODE, (uint8_t) mode);
+              ESP_LOGD("BLE", "send mode=%d: %s", mode, format_hex_pretty(payload).c_str());
+              return payload;
+
+  - platform: template
+    id: heater_temp_unit
+    name: "Temperature Unit"
+    icon: "mdi:thermometer-bluetooth"
+    options:
+      - "C"
+      - "F"
+    initial_option: "F"
+    optimistic: true
+    set_action:
+      then:
+        - ble_client.ble_write:
+            id: heater_ble
+            service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+            characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+            value: !lambda |-
+              uint8_t unit = x == "C" ? 0x00 : 0x01;
+              auto payload = heater_ble_payload(HeaterCommand::SET_TEMP_UNIT, unit);
+              ESP_LOGD("BLE", "send unit=%s: %s", x.c_str(), format_hex_pretty(payload).c_str());
+              return payload;
+
+  - platform: template
+    id: heater_language
+    name: "Language"
+    icon: "mdi:translate"
+    options:
+      - "English"
+      - "简体中文"
+      - "Русский"
+      - "Disabled"
+      - "Deutsch"
+    initial_option: "English"
+    optimistic: true
+    set_action:
+      then:
+        - ble_client.ble_write:
+            id: heater_ble
+            service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+            characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+            value: !lambda |-
+              Language lang = Language::ENGLISH;
+              if (x == "简体中文") { lang = Language::CHINESE; }
+              else if (x == "Русский") { lang = Language::RUSSIAN; }
+              else if (x == "Disabled") { lang = Language::OFF; }
+              else if (x == "Deutsch") { lang = Language::GERMAN; }
+              
+              auto payload = heater_ble_payload(HeaterCommand::SET_LANGUAGE, (uint8_t) lang);
+              ESP_LOGD("BLE", "send lang=%s (%d): %s", x.c_str(), index, format_hex_pretty(payload).c_str());
+              return payload;
+
+  - platform: template
+    id: heater_altitude_unit
+    name: "Altitude Unit"
+    icon: "mdi:altimeter"
+    options:
+      - "KM"
+      - "KFT"
+      - "Disabled"
+    initial_option: "Disabled"
+    optimistic: true
+    set_action:
+      then:
+        - ble_client.ble_write:
+            id: heater_ble
+            service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+            characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+            value: !lambda |-
+              AltitudeUnit unit = AltitudeUnit::KILOMETERS;
+              if (x == "KFT") { unit = AltitudeUnit::KILOFEET; }
+              if (x == "Disabled") { unit = AltitudeUnit::OFF; }
+              
+              auto payload = heater_ble_payload(HeaterCommand::SET_ALTITUDE_UNIT, (uint8_t) unit);
+              ESP_LOGD("BLE", "send heater_altitude unit=%s (%d): %s", x.c_str(), index, format_hex_pretty(payload).c_str());
+              return payload;
+
+number:
+  - platform: template
+    id: heater_temperature
+    name: "Temperature"
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer"
+    min_value: 8
+    max_value: 36
+    step: 1
+    optimistic: true
+    set_action:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(heater_mode).current_option() != "Automatic";'
+            then:
+              - logger.log: "Switching to AUTOMATIC mode..."
+              - ble_client.ble_write:
+                  id: heater_ble
+                  service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+                  characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+                  value: !lambda |-
+                    auto payload = heater_ble_payload(HeaterCommand::SET_RUN_MODE, (uint8_t) RunMode::TEMPERATURE);
+                    ESP_LOGD("BLE", "send mode=auto: %s", format_hex_pretty(payload).c_str());
+                    return payload;
+              - delay: 1s
+
+        - ble_client.ble_write:
+            id: heater_ble
+            service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+            characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+            value: !lambda |-
+              uint8_t adjusted;
+
+              if (id(heater_temp_unit).current_option() == "F") {
+                  adjusted = static_cast<uint8_t>(roundf(x * 9.0f / 5.0f + 32.0f));
+              } else {
+                  adjusted = x;
+              }
+              
+              auto payload = heater_ble_payload(HeaterCommand::SET_PARAMETER, adjusted);
+              ESP_LOGD("BLE", "send temp=%d: %s", adjusted, format_hex_pretty(payload).c_str());
+              return payload;
+
+  - platform: template
+    id: heater_level
+    name: "Level"
+    unit_of_measurement: "Level"
+    icon: "mdi:knob"
+    min_value: 1
+    max_value: 10
+    step: 1
+    optimistic: true
+    set_action:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(heater_mode).current_option() != "Level";'
+            then:
+              - logger.log: "Switching to LEVEL mode..."
+              - ble_client.ble_write:
+                  id: heater_ble
+                  service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+                  characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+                  value: !lambda |-
+                    auto payload = heater_ble_payload(HeaterCommand::SET_RUN_MODE, (uint8_t) RunMode::GEAR);
+                    ESP_LOGD("BLE", "send mode=level: %s", format_hex_pretty(payload).c_str());
+                    return payload;
+              - delay: 1s
+
+        - ble_client.ble_write:
+            id: heater_ble
+            service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+            characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+            value: !lambda |-
+              auto payload = heater_ble_payload(HeaterCommand::SET_PARAMETER, x);
+              ESP_LOGD("BLE", "send level: %s", format_hex_pretty(payload).c_str());
+              return payload;
+
+  - platform: template
+    id: heater_auto_on_run_time
+    name: "Auto On — Run Time"
+    icon: "mdi:timer-outline"
+    unit_of_measurement: "minutes"
+    min_value: 30
+    max_value: 630
+    step: 30
+    optimistic: true
+    set_action:
+      then:
+        - ble_client.ble_write:
+            id: heater_ble
+            service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+            characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+            value: !lambda |-
+              auto payload = heater_ble_payload_16(HeaterCommand::SET_AUTO_ON_RUN_DURATION, x);
+              ESP_LOGD("BLE", "send autoOnRunTime: %s", format_hex_pretty(payload).c_str());
+              return payload;
+
+  - platform: template
+    id: heater_temp_compensation
+    name: "Temperature Compensation"
+    min_value: -9
+    max_value: 9
+    step: 1
+    unit_of_measurement: "°C/°F"
+    optimistic: true
+    set_action:
+      then:
+        - ble_client.ble_write:
+            id: heater_ble
+            service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+            characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+            value: !lambda |-
+              int16_t value = static_cast<int8_t>(x);
+              auto payload = heater_ble_payload_16(HeaterCommand::SET_TEMP_COMPENSATION, value);
+              ESP_LOGD("BLE", "send temperature compensation (%d): %s", value, format_hex_pretty(payload).c_str());
+              return payload;
+
+  - platform: template
+    id: heater_display_brightness
+    name: "Display Brightness"
+    min_value: 0
+    max_value: 4
+    step: 1
+    optimistic: true
+    set_action:
+      then:
+        - ble_client.ble_write:
+            id: heater_ble
+            service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+            characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+            value: !lambda |-
+              uint8_t value = (uint8_t)x;
+              auto payload = heater_ble_payload(HeaterCommand::SET_BRIGHTNESS, value);
+              ESP_LOGD("BLE", "send display brightness (%d): %s", value, format_hex_pretty(payload).c_str());
+              return payload;
+
+datetime:
+  - platform: template
+    id: heater_auto_on_start_time
+    name: "Auto On — Start Time"
+    icon: "mdi:clock-start"
+    type: time
+    initial_value:
+      hour: 5
+      minute: 30
+      second: 0
+    optimistic: true
+    set_action:
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(mute_set_action);'
+            then:
+              - ble_client.ble_write:
+                  id: heater_ble
+                  service_uuid: "0000FFE0-0000-1000-8000-00805F9B34FB"
+                  characteristic_uuid: "0000FFE1-0000-1000-8000-00805F9B34FB"
+                  value: !lambda |-
+                    auto payload = heater_ble_payload_16(HeaterCommand::SET_AUTO_ON_START_TIME, x.hour * 60 + x.minute);
+                    ESP_LOGD("BLE", "send auto on time %02d:%02d: %s", x.hour, x.minute, format_hex_pretty(payload).c_str());
+                    return payload;

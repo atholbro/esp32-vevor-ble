@@ -72,8 +72,8 @@ Inside the YAML:
 
 ``` yaml
 substitutions:
-  name: bt-vevor_ble
-  friendly_name: Diesel_Air_Heater
+  name: "diesel-air-heater-ble"
+  friendly_name: Diesel Air Heater
 ```
 
 Modify these if you want your device to appear differently in Home Assistant.
@@ -83,10 +83,17 @@ Modify these if you want your device to appear differently in Home Assistant.
 ### First-time USB flash:
 
 ``` bash
-esphome run vevor_ble.yaml
+esphome run diesel-air-heater-ble.yaml
 ```
 
-After the ESP32 is flashed once, all future updates can be done **OTA** via WIFI.
+### After the ESP32 is flashed once, all future updates can be done **OTA** via WIFI:
+``` bash
+esphome clean diesel-air-heater-ble.yaml
+esphome compile diesel-air-heater-ble.yaml
+esphome upload diesel-air-heater-ble.yaml
+```
+_select the OTA option at the prompt_
+
 
 # 📡 Features & Home Assistant Integration
 
@@ -94,42 +101,60 @@ This ESPHome configuration performs **bidirectional BLE communication** with the
 
 ## ✓ Controls Available
 
-| Control                     | Description                                     |
-|-----------------------------|-------------------------------------------------|
-| **Heater Power (On/Off)**   | Heater On/Off                                   |
-| **Mode Selection**          | Level mode or Automatic (temperature) mode.     |
-| **Level Setpoint**          | Sets output level 0--10 (Level mode).           |
-| **Temperature Setpoint**    | Sets target temperature in °C (Automatic mode). |
+### Power & Operation
+| Control                     | Type     | Description                                     |
+|-----------------------------|----------|-------------------------------------------------|
+| **Power**                   | Switch   | Turn heater on/off                              |
+| **Mode**                    | Select   | Level mode or Automatic (temperature) mode      |
+| **Level**                   | Number   | Sets output level 1-10 (Level mode)             |
+| **Temperature**             | Number   | Sets target temperature 8-36°C (Automatic mode) |
 
-# 📊 Telemetry Decoding (Published to Home Assistant)
+### Settings & Configuration
+| Control                     | Type     | Description                                     |
+|-----------------------------|----------|-------------------------------------------------|
+| **Temperature Unit**        | Select   | Choose Celsius or Fahrenheit display            |
+| **Language**                | Select   | Set display language (English, 简体中文, Русский, Disabled, Deutsch) |
+| **Altitude Unit**           | Select   | Choose meters, feet, or kilometers              |
+| **Temperature Compensation**| Number   | Fine-tune temperature readings (-10 to +10)     |
+| **Display Brightness**      | Number   | Adjust screen brightness (0-5)                  |
+| **Set Time**                | Button   | Sync heater clock with Home Assistant time      |
+
+### Auto-On Scheduling
+| Control                     | Type     | Description                                     |
+|-----------------------------|----------|-------------------------------------------------|
+| **Auto On Status**          | Switch   | Enable/disable scheduled auto-start             |
+| **Auto On Start Time**      | Time     | Set time for automatic heater start             |
+| **Auto On Run Time**        | Number   | Duration heater runs during auto-on (minutes)   |
+
+# 📊 Telemetry & Sensors (Published to Home Assistant)
 
 ### Status Sensors
 
--   **Heater Running** (binary_sensor)
--   **Heater Mode** ("Level" / "Automatic")
--   **Glow Plug Status** ("Heating", "Running", "Cooling Down", etc.)
--   **Error Code**
+| Sensor                 | Type          | Description                                    |
+|------------------------|---------------|------------------------------------------------|
+| **Power**              | Binary Sensor | Whether heater is currently running            |
+| **Mode**               | Text Sensor   | Current mode: "Level" or "Automatic"           |
+| **Glow Plug Status**   | Text Sensor   | Operating state (Heating, Running, Cooling Down, Idle) |
+| **Error Code**         | Sensor        | Current error code (0 = no error)              |
 
-### Environmental / System Sensors
+### Environmental Sensors
 
--   **Cabin Temperature (°C)**
--   **Heater Core Temperature (°C)**
--   **Battery Voltage (V)**
--   **Altitude (m)**
--   **Uptime**
+| Sensor                 | Unit | Description                                    |
+|------------------------|------|------------------------------------------------|
+| **Room Temperature**   | °C   | Ambient/cabin temperature                      |
+| **Core Temperature**   | °C   | Heater core/exhaust temperature                |
+| **Battery Voltage**    | V    | Supply voltage from vehicle battery            |
+| **Altitude**           | m    | Current altitude setting                       |
 
-### Device Metadata
+### System Sensors
 
--   Part number
--   Motherboard firmware version
--   CO sensor active + PPM (if present)
--   Temperature & altitude units
--   Language broadcast by the controller
-
-### Raw BLE Data
-
-One raw characteristic sensor exposes the **full decrypted frame** for
-debugging.
+| Sensor                 | Description                                    |
+|------------------------|------------------------------------------------|
+| **ESP Uptime**         | Time since ESP32 last boot                     |
+| **ESPHome Version**    | Installed ESPHome firmware version             |
+| **WiFi Signal**        | WiFi signal strength (RSSI)                    |
+| **IP Address**         | Current IP address on network                  |
+| **Connected SSID**     | Name of WiFi network                           |
 
 # 🙏 Credits & Related Projects
 
